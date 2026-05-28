@@ -3,8 +3,7 @@
 # https://rancher.com/support-maintenance-terms#rancher-support-matrix
 
 # Included namespaces
-SYSTEM_NAMESPACES=(kube-system kube-public cattle-system cattle-alerting cattle-logging cattle-pipeline cattle-provisioning-capi-system cattle-resources-system ingress-nginx cattle-prometheus istio-system longhorn-system cattle-global-data fleet-system fleet-default rancher-operator-system cattle-monitoring-system cattle-logging-system cattle-fleet-system cattle-fleet-local-system tigera-operator calico-system suse-observability rancher-turtles-system capi-system rke2-bootstrap-system rke2-control-plane-system cattle-ai-agent-system)
-APP_NAMESPACES=(kube-system cattle-system cattle-fleet-system cattle-fleet-local-system cattle-provisioning-capi-system cattle-resources-system cattle-ui-plugin-system)
+SYSTEM_NAMESPACES=(kube-system kube-public cattle-system cattle-alerting cattle-logging cattle-pipeline cattle-provisioning-capi-system cattle-resources-system ingress-nginx cattle-prometheus cattle-ui-plugin-system istio-system longhorn-system cattle-global-data fleet-system fleet-default rancher-operator-system cattle-monitoring-system cattle-logging-system cattle-fleet-system cattle-fleet-local-system tigera-operator calico-system suse-observability cattle-turtles-system cattle-capi-system rke2-bootstrap-system rke2-control-plane-system cattle-ai-agent-system)
 
 # Included container logs
 KUBE_CONTAINERS=(etcd etcd-rolling-snapshots kube-apiserver kube-controller-manager kubelet kube-scheduler kube-proxy nginx-proxy)
@@ -648,7 +647,7 @@ k3s-k8s() {
     for OBJECT in "${K8S_OBJECTS_NAMESPACED[@]}"; do
       k3s kubectl get "$OBJECT" --all-namespaces -o wide > "${TMPDIR}/${DISTRO}/kubectl/${OBJECT}" 2>&1
     done
-    for APP_NS in "${APP_NAMESPACES[@]}"; do
+    for APP_NS in "${SYSTEM_NAMESPACES[@]}"; do
       k3s kubectl get apps.catalog.cattle.io --ignore-not-found=true --namespace $APP_NS 2>&1 | tee -a "${TMPDIR}/${DISTRO}/kubectl/apps" "${TMPDIR}/versions" >/dev/null
     done
 
@@ -728,7 +727,7 @@ rke2-k8s() {
     for OBJECT in "${K8S_OBJECTS_NAMESPACED[@]}"; do
       "${RKE2_DATA_DIR}"/bin/kubectl --kubeconfig="$KUBECONFIG" get "$OBJECT" --all-namespaces -o wide > "${TMPDIR}/${DISTRO}/kubectl/${OBJECT}" 2>&1
     done
-    for APP_NS in "${APP_NAMESPACES[@]}"; do
+    for APP_NS in "${SYSTEM_NAMESPACES[@]}"; do
       "${RKE2_DATA_DIR}"/bin/kubectl --kubeconfig="$KUBECONFIG" get apps.catalog.cattle.io --ignore-not-found=true --namespace $APP_NS 2>&1 | tee -a "${TMPDIR}/${DISTRO}/kubectl/apps" "${TMPDIR}/versions" >/dev/null
     done
 
@@ -808,7 +807,7 @@ pod-k8s() {
     for OBJECT in "${K8S_OBJECTS_NAMESPACED[@]}"; do
       kubectl get "$OBJECT" --all-namespaces -o wide > "${TMPDIR}/${DISTRO}/kubectl/${OBJECT}" 2>&1
     done
-    for APP_NS in "${APP_NAMESPACES[@]}"; do
+    for APP_NS in "${SYSTEM_NAMESPACES[@]}"; do
       kubectl get apps.catalog.cattle.io --ignore-not-found=true --namespace $APP_NS 2>&1 | tee -a "${TMPDIR}/${DISTRO}/kubectl/apps" "${TMPDIR}/versions" >/dev/null
     done
 
@@ -1417,13 +1416,16 @@ EOF
 cleanup() {
 
   rm -r -f "$TMPDIR_BASE" > /dev/null 2>&1
+  if [ "$CHROOTED_DEBUG_POD" = "true" ]; then
+    rm /tmp/$(basename "$0")
+  fi
 
 }
 
 help() {
 
   echo "Rancher 2.x logs-collector
-  Usage: rancher2_logs_collector.sh [ -d <directory> -s <days> -r <k8s distribution> -p -f ]
+  Usage: rancher2_logs_collector.sh [ -d <directory> -s <days> -r <k8s distribution> -p -f -D ]
 
   All flags are optional
 
@@ -1436,7 +1438,8 @@ help() {
   -r    Override k8s distribution if not automatically detected (rke|k3s|rke2|kubeadm)
   -p    When supplied runs with the default nice/ionice priorities, otherwise use the lowest priorities
   -f    Force log collection if the minimum space isn't available
-  -o    Obfuscate IP addresses"
+  -o    Obfuscate IP addresses
+  -D    Run script via chroot /host (for use with kubectl debug node)"
 
 }
 
@@ -1460,7 +1463,7 @@ if [[ $EUID -ne 0 ]] && [[ "$DEV" == "" ]]
     exit 1
 fi
 
-while getopts "c:d:s:e:S:E:r:fpoh" opt; do
+while getopts "c:d:s:e:S:E:r:fpohD" opt; do
   case $opt in
     c)
       FLAG_DATA_DIR="$OPTARG"
@@ -1500,6 +1503,9 @@ while getopts "c:d:s:e:S:E:r:fpoh" opt; do
     o)
       OBFUSCATE=true
       ;;
+    D)
+      DEBUG_POD=true
+      ;;
     h)
       help && exit 0
       ;;
@@ -1511,6 +1517,26 @@ while getopts "c:d:s:e:S:E:r:fpoh" opt; do
       help && exit 0
   esac
 done
+
+if [ "$DEBUG_POD" = "true" ]; then
+  if [ ! -d "/host" ]; then
+    techo "Error: /host directory not found. This flag is intended for use with 'kubectl debug node'."
+    exit 1
+  fi
+  cp -u "$0" "/host/tmp/$(basename "$0")"
+  ARGS=()
+  for arg in "$@"; do
+    if [ "$arg" != "-D" ]; then
+      ARGS+=("$arg")
+    fi
+  done
+  techo "Re-executing script via chroot /host..."
+  export CHROOTED_DEBUG_POD=true
+  exec chroot /host bash "/tmp/$(basename "$0")" "${ARGS[@]}" || {
+    techo "[!] Failed to enter chroot at /host. Check mounts." >&2
+    exit 1
+  }
+fi
 
 if [ -n "$START_DAY" ] && [ -n "$END_DAY" ] && [ "$END_DAY" -ge "$START_DAY" ]
   then
@@ -1553,6 +1579,12 @@ if [ ! "$DISTRO" = "pod" ]; then
     sles)
       system-sles
       ;;
+    sle-micro)
+      system-sles
+      ;;
+    opensuse-leap)
+      system-sles
+      ;;
     *)
       echo "[!] Unsupported OS: $OSRELEASE"
       ;;
@@ -1589,7 +1621,15 @@ if [ "$DISTRO" = "pod" ]; then
     NS_FLAG="-n $NS"
   fi
   echo "
-To copy the collection from the pod:
+    To copy the collection from the pod:
 
-  kubectl cp ${NS_FLAG} $(hostname):${DIR_NAME}/${LOGNAME}.tar.gz ${LOGNAME}.tar.gz"
+      kubectl cp ${NS_FLAG} $(hostname):${DIR_NAME}/${LOGNAME}.tar.gz ${LOGNAME}.tar.gz"
+fi
+if [ "$CHROOTED_DEBUG_POD" = "true" ]; then
+  echo "
+    To copy the collection from the debug pod:
+
+      kubectl cp \$POD_NAME:/host${DIR_NAME}/${LOGNAME}.tar.gz ${LOGNAME}.tar.gz"
+  # Sleep for 1 day to allow log collection from the pod
+  sleep 86400
 fi
